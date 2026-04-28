@@ -96,7 +96,7 @@ export default function App() {
         await fetchBackups(token);
       } catch (error) {
         if (error.code === 401) {
-          setAuthError('Token invalid. Introdu tokenul corect.');
+          setAuthError('Parolă invalidă. Introdu parola corectă.');
           setToken('');
           clearToken();
         } else {
@@ -331,13 +331,13 @@ export default function App() {
       <div className="flex min-h-screen items-center justify-center bg-slate-100 p-4">
         <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow">
           <h2 className="text-xl font-semibold text-slate-800">Autentificare admin</h2>
-          <p className="mt-2 text-sm text-slate-600">Introdu tokenul pentru acces la datele evenimentului.</p>
+          <p className="mt-2 text-sm text-slate-600">Introdu parola pentru acces la datele evenimentului.</p>
           <input
             type="password"
             value={tokenInput}
             onChange={(eventObj) => setTokenInput(eventObj.target.value)}
             className="mt-4 w-full rounded-lg border border-slate-300 px-3 py-2"
-            placeholder="ADMIN_TOKEN"
+            placeholder="Parola"
           />
           {authError && <p className="mt-3 text-sm text-rose-600">{authError}</p>}
           <button onClick={onLogin} className="mt-4 w-full rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white">Conectează-te</button>

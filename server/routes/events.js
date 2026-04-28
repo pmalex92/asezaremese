@@ -8,8 +8,6 @@ const router = express.Router();
 const BACKUPS_DIR = path.join(process.cwd(), 'backups');
 if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
 
-const MAX_AUTO_BACKUPS = 20;
-
 const sanitizeName = (value) => (value || 'event').toString().trim().toLowerCase().replace(/[^a-z0-9-_]+/gi, '-').replace(/^-+|-+$/g, '') || 'event';
 
 const readBackupFile = (filename) => {
@@ -28,20 +26,12 @@ const listBackups = () => fs.readdirSync(BACKUPS_DIR)
   })
   .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-const trimAutoBackups = () => {
-  const autoBackups = listBackups().filter((item) => item.id.startsWith('backup-'));
-  if (autoBackups.length <= MAX_AUTO_BACKUPS) return;
-
-  autoBackups.slice(MAX_AUTO_BACKUPS).forEach((item) => {
-    fs.unlinkSync(path.join(BACKUPS_DIR, item.id));
-  });
-};
-
 const createBackup = ({ event, reason, auto = false }) => {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const eventName = sanitizeName(event.name);
-  const prefix = auto ? 'backup' : 'manual-backup';
-  const fileName = `${prefix}-${eventName}-${timestamp}.json`;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const fileName = auto
+    ? `backup-${eventName}-latest.json`
+    : `manual-backup-${eventName}-${timestamp}.json`;
 
   const payload = {
     version: 1,
@@ -51,8 +41,6 @@ const createBackup = ({ event, reason, auto = false }) => {
   };
 
   fs.writeFileSync(path.join(BACKUPS_DIR, fileName), JSON.stringify(payload, null, 2), 'utf-8');
-
-  if (auto) trimAutoBackups();
 
   return fileName;
 };
