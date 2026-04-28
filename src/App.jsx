@@ -8,6 +8,9 @@ import { AddTableModal } from './components/AddTableModal';
 import { ExportPanel } from './components/ExportPanel';
 import { PrintView } from './components/PrintView';
 import { SearchBar } from './components/SearchBar';
+import { ImportExcelModal } from './components/ImportExcelModal';
+import { ManualDuplicateModal } from './components/ManualDuplicateModal';
+import { buildGuestIndex, normalizeName } from './utils/guestMatching';
 import { clearAllData, loadEvent, resetToDemo, saveEvent } from './utils/storage';
 
 const uid = () => crypto.randomUUID();
@@ -23,6 +26,9 @@ export default function App() {
   const [guestModal, setGuestModal] = useState({ open: false, guest: null, targetTableId: null });
   const [tableModal, setTableModal] = useState({ open: false, table: null });
   const [exportOpen, setExportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importMessage, setImportMessage] = useState('');
+  const [manualDuplicateState, setManualDuplicateState] = useState({ open: false, existing: null, payload: null });
 
   useEffect(() => saveEvent(event), [event]);
 
@@ -58,11 +64,7 @@ export default function App() {
   const findTableById = (tableId) => event.tables.find((table) => table.id === tableId);
   const tableOccupancy = (tableId) => event.guests.filter((guest) => guest.tableId === tableId).length;
 
-  const upsertGuest = (payload) => {
-    if (!payload.name) return alert('Numele este obligatoriu.');
-    const duplicate = event.guests.find((guest) => guest.name.toLowerCase() === payload.name.toLowerCase() && guest.id !== guestModal.guest?.id);
-    if (duplicate && !confirm('Există deja un invitat cu același nume. Continui?')) return;
-
+  const commitGuest = (payload) => {
     setEvent((prev) => {
       if (guestModal.guest) {
         return {
@@ -76,6 +78,20 @@ export default function App() {
       };
     });
     setGuestModal({ open: false, guest: null, targetTableId: null });
+  };
+
+  const upsertGuest = (payload) => {
+    if (!payload.name) return alert('Numele este obligatoriu.');
+
+    const guestIndex = buildGuestIndex(event.guests);
+    const existing = guestIndex.get(normalizeName(payload.name))?.find((guest) => guest.id !== guestModal.guest?.id);
+
+    if (existing && !guestModal.guest) {
+      setManualDuplicateState({ open: true, existing, payload });
+      return;
+    }
+
+    commitGuest(payload);
   };
 
   const upsertTable = (payload) => {
@@ -142,14 +158,35 @@ export default function App() {
     setEvent((prev) => ({ ...prev, guests: prev.guests.filter((item) => item.id !== guest.id) }));
   };
 
-  const handleDragStart = (event, guestId) => {
-    event.dataTransfer.setData('text/plain', guestId);
+  const handleDragStart = (eventObj, guestId) => {
+    eventObj.dataTransfer.setData('text/plain', guestId);
   };
 
-  const handleDropGuest = (event, tableId) => {
-    event.preventDefault();
-    const guestId = event.dataTransfer.getData('text/plain');
+  const handleDropGuest = (eventObj, tableId) => {
+    eventObj.preventDefault();
+    const guestId = eventObj.dataTransfer.getData('text/plain');
     if (guestId) seatGuest(guestId, tableId);
+  };
+
+  const handleImportApply = ({ toAdd, updates, keptDuplicates, skippedDuplicates }) => {
+    setEvent((prev) => ({
+      ...prev,
+      guests: [
+        ...prev.guests.map((guest) => {
+          const update = updates.find((item) => item.id === guest.id);
+          if (!update) return guest;
+          const { _row, _key, ...payload } = update.payload;
+          return { ...guest, ...payload };
+        }),
+        ...toAdd.map((guest) => {
+          const { _row, _key, ...payload } = guest;
+          return { id: uid(), ...payload, tableId: null };
+        }),
+      ],
+    }));
+
+    setImportMessage(`Au fost importați ${toAdd.length + updates.length} invitați. ${keptDuplicates} duplicate au fost păstrate, ${skippedDuplicates} duplicate au fost ignorate.`);
+    setTimeout(() => setImportMessage(''), 5000);
   };
 
   return (
@@ -162,11 +199,14 @@ export default function App() {
             onEventNameChange={(name) => setEvent((prev) => ({ ...prev, name }))}
             onOpenGuest={() => setGuestModal({ open: true, guest: null, targetTableId: null })}
             onOpenTable={() => setTableModal({ open: true, table: null })}
+            onImport={() => setImportOpen(true)}
             onExport={() => setExportOpen(true)}
             onResetDemo={() => setEvent(resetToDemo())}
             onClearAll={() => confirm('Ștergi toate datele?') && setEvent(clearAllData())}
           />
         </div>
+
+        {importMessage && <div className="no-print rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">{importMessage}</div>}
 
         <div className="no-print rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
           <h3 className="mb-2 text-sm font-semibold text-slate-700">Căutare globală</h3>
@@ -213,7 +253,7 @@ export default function App() {
             onAddSeat={(table) => changeSeats(table, 1)}
             onRemoveSeat={(table) => changeSeats(table, -1)}
             onDropGuest={handleDropGuest}
-            onDragOver={(event) => event.preventDefault()}
+            onDragOver={(eventObj) => eventObj.preventDefault()}
           />
         </div>
       </div>
@@ -253,6 +293,25 @@ export default function App() {
         initialTable={tableModal.table}
         onClose={() => setTableModal({ open: false, table: null })}
         onSubmit={upsertTable}
+      />
+
+      <ImportExcelModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        event={event}
+        onApply={handleImportApply}
+      />
+
+      <ManualDuplicateModal
+        open={manualDuplicateState.open}
+        duplicate={manualDuplicateState.existing}
+        tableLabel={manualDuplicateState.existing?.tableId ? `Masa ${event.tables.find((table) => table.id === manualDuplicateState.existing.tableId)?.number}` : null}
+        onAddAnyway={() => {
+          commitGuest(manualDuplicateState.payload);
+          setManualDuplicateState({ open: false, existing: null, payload: null });
+        }}
+        onCancel={() => setManualDuplicateState({ open: false, existing: null, payload: null })}
+        onEditName={() => setManualDuplicateState({ open: false, existing: null, payload: null })}
       />
 
       <ExportPanel

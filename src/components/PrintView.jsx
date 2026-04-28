@@ -1,19 +1,26 @@
+import { buildPrintData } from '../utils/printData';
+
 export function PrintView({ event }) {
-  const tableMap = new Map(event.tables.map((table) => [table.id, table]));
-  const guestsByTable = event.tables.map((table) => ({
-    table,
-    guests: event.guests.filter((guest) => guest.tableId === table.id).sort((a, b) => a.name.localeCompare(b.name, 'ro')),
-  }));
-  const alphaGuests = event.guests
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name, 'ro'));
+  const report = buildPrintData(event);
 
   return (
-    <div className="hidden print:block print:p-6">
-      <h1 className="mb-4 text-2xl font-bold">{event.name}</h1>
+    <div className="print-only bg-white p-8 text-slate-900">
+      <h1 className="mb-4 text-3xl font-bold">{event.name}</h1>
+
       <section className="mb-6">
-        <h2 className="mb-2 text-xl font-semibold">A. Lista pe mese</h2>
-        {guestsByTable.map(({ table, guests }) => (
+        <h2 className="mb-2 text-xl font-semibold">Rezumat</h2>
+        <ul className="list-disc pl-6">
+          <li>Total invitați: {report.summary.totalGuests}</li>
+          <li>Total mese: {report.summary.totalTables}</li>
+          <li>Invitați așezați: {report.summary.seatedGuests}</li>
+          <li>Invitați neașezați: {report.summary.unseatedGuests}</li>
+          <li>Locuri libere: {report.summary.freeSeats}</li>
+        </ul>
+      </section>
+
+      <section className="mb-6">
+        <h2 className="mb-2 text-xl font-semibold">Lista pe mese</h2>
+        {report.tables.map(({ table, guests }) => (
           <div key={table.id} className="mb-3">
             <h3 className="font-semibold">Masa {table.number}</h3>
             <ul className="list-disc pl-6">
@@ -23,13 +30,22 @@ export function PrintView({ event }) {
           </div>
         ))}
       </section>
-      <section>
-        <h2 className="mb-2 text-xl font-semibold">B. Lista alfabetică</h2>
+
+      <section className="mb-6">
+        <h2 className="mb-2 text-xl font-semibold">Lista invitaților neașezați</h2>
         <ul className="list-disc pl-6">
-          {alphaGuests.map((guest) => (
-            <li key={guest.id}>
-              {guest.name} — {guest.tableId ? `Masa ${tableMap.get(guest.tableId)?.number}` : 'Neașezat'}
-            </li>
+          {report.unseatedGuests.length === 0 && <li>Nu există invitați neașezați</li>}
+          {report.unseatedGuests.map((guest) => (
+            <li key={guest.id}>{guest.name} — {guest.group}{guest.menu ? ` — ${guest.menu}` : ''}</li>
+          ))}
+        </ul>
+      </section>
+
+      <section>
+        <h2 className="mb-2 text-xl font-semibold">Lista alfabetică</h2>
+        <ul className="list-disc pl-6">
+          {report.alphabetical.map((guest) => (
+            <li key={guest.id}>{guest.name} — {guest.tableLabel}</li>
           ))}
         </ul>
       </section>
