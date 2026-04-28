@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { HeaderStats } from './components/HeaderStats';
 import { GuestSidebar } from './components/GuestSidebar';
 import { TableGrid } from './components/TableGrid';
@@ -11,12 +11,45 @@ import { SearchBar } from './components/SearchBar';
 import { ImportExcelModal } from './components/ImportExcelModal';
 import { ManualDuplicateModal } from './components/ManualDuplicateModal';
 import { buildGuestIndex, normalizeName } from './utils/guestMatching';
-import { clearAllData, loadEvent, resetToDemo, saveEvent } from './utils/storage';
+import {
+  clearAllData,
+  clearCachedEvent,
+  clearToken,
+  emptyEvent,
+  loadCachedEvent,
+  loadToken,
+  normalizeEvent,
+  resetToDemo,
+  saveCachedEvent,
+  saveToken,
+} from './utils/storage';
+import {
+  createBackup,
+  downloadBackup,
+  getEvent as getEventFromApi,
+  listBackups,
+  resetEvent,
+  restoreBackup,
+  saveEvent as saveEventToApi,
+} from './utils/api';
 
 const uid = () => crypto.randomUUID();
 
+const hasData = (event) => Boolean(event.updatedAt || event.name || event.tables.length || event.guests.length);
+
 export default function App() {
-  const [event, setEvent] = useState(loadEvent);
+  const [event, setEvent] = useState(emptyEvent);
+  const [tokenInput, setTokenInput] = useState(loadToken());
+  const [token, setToken] = useState(loadToken());
+  const [isBooting, setIsBooting] = useState(true);
+  const [authError, setAuthError] = useState('');
+  const [serverStatus, setServerStatus] = useState('offline');
+  const [saveMessage, setSaveMessage] = useState('Nesalvat');
+  const [saveWarning, setSaveWarning] = useState('');
+  const [lastSavedAt, setLastSavedAt] = useState(null);
+  const [showNoEventScreen, setShowNoEventScreen] = useState(false);
+  const [backupList, setBackupList] = useState([]);
+
   const [guestSearch, setGuestSearch] = useState('');
   const [groupFilter, setGroupFilter] = useState('all');
   const [globalSearch, setGlobalSearch] = useState('');
@@ -30,7 +63,91 @@ export default function App() {
   const [importMessage, setImportMessage] = useState('');
   const [manualDuplicateState, setManualDuplicateState] = useState({ open: false, existing: null, payload: null });
 
-  useEffect(() => saveEvent(event), [event]);
+  const skipNextSave = useRef(true);
+
+  const fetchBackups = async (authToken) => {
+    try {
+      const result = await listBackups(authToken);
+      setBackupList(result.backups || []);
+    } catch {
+      setBackupList([]);
+    }
+  };
+
+  useEffect(() => {
+    if (!token) {
+      setIsBooting(false);
+      setShowNoEventScreen(false);
+      return;
+    }
+
+    const bootstrap = async () => {
+      setIsBooting(true);
+      setAuthError('');
+      try {
+        const serverEvent = normalizeEvent(await getEventFromApi(token));
+        setEvent(serverEvent);
+        setLastSavedAt(serverEvent.updatedAt);
+        setShowNoEventScreen(!hasData(serverEvent));
+        setServerStatus('online');
+        setSaveMessage(serverEvent.updatedAt ? 'Salvat pe server' : 'Nesalvat');
+        setSaveWarning('');
+        clearCachedEvent();
+        await fetchBackups(token);
+      } catch (error) {
+        if (error.code === 401) {
+          setAuthError('Token invalid. Introdu tokenul corect.');
+          setToken('');
+          clearToken();
+        } else {
+          const cached = loadCachedEvent();
+          if (cached) setEvent(cached);
+          setServerStatus('offline');
+          setSaveWarning('Serverul nu este disponibil. Modificările sunt salvate temporar local.');
+        }
+      } finally {
+        skipNextSave.current = true;
+        setIsBooting(false);
+      }
+    };
+
+    bootstrap();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || isBooting) return;
+
+    if (skipNextSave.current) {
+      skipNextSave.current = false;
+      return;
+    }
+
+    const timeout = setTimeout(async () => {
+      saveCachedEvent(event);
+      setSaveMessage('Se salvează...');
+
+      try {
+        const result = await saveEventToApi(token, event);
+        setServerStatus('online');
+        setSaveWarning('');
+        setLastSavedAt(result.updatedAt || new Date().toISOString());
+        setSaveMessage('Salvat pe server');
+      } catch (error) {
+        if (error.code === 401) {
+          clearToken();
+          setToken('');
+          setAuthError('Sesiunea a expirat. Reautentificare necesară.');
+          return;
+        }
+
+        setServerStatus('offline');
+        setSaveWarning('Serverul nu este disponibil. Modificările sunt salvate temporar local.');
+        setSaveMessage('Salvat local (fallback)');
+      }
+    }, 800);
+
+    return () => clearTimeout(timeout);
+  }, [event, isBooting, token]);
 
   const metrics = useMemo(() => {
     const totalGuests = event.guests.length;
@@ -77,6 +194,7 @@ export default function App() {
         guests: [...prev.guests, { id: uid(), ...payload, tableId: guestModal.targetTableId ?? null }],
       };
     });
+    setShowNoEventScreen(false);
     setGuestModal({ open: false, guest: null, targetTableId: null });
   };
 
@@ -108,6 +226,7 @@ export default function App() {
       }
       return { ...prev, tables: [...prev.tables, { id: uid(), ...payload }] };
     });
+    setShowNoEventScreen(false);
     setTableModal({ open: false, table: null });
   };
 
@@ -189,73 +308,185 @@ export default function App() {
     setTimeout(() => setImportMessage(''), 5000);
   };
 
+  const onLogin = async () => {
+    if (!tokenInput.trim()) return;
+    saveToken(tokenInput.trim());
+    setToken(tokenInput.trim());
+  };
+
+  const onImportBackupFile = async (file) => {
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (!parsed?.event) return alert('Fișier backup invalid.');
+      setEvent(normalizeEvent(parsed.event));
+      setShowNoEventScreen(false);
+    } catch {
+      alert('Nu am putut importa backup-ul.');
+    }
+  };
+
+  if (!token) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-100 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow">
+          <h2 className="text-xl font-semibold text-slate-800">Autentificare admin</h2>
+          <p className="mt-2 text-sm text-slate-600">Introdu tokenul pentru acces la datele evenimentului.</p>
+          <input
+            type="password"
+            value={tokenInput}
+            onChange={(eventObj) => setTokenInput(eventObj.target.value)}
+            className="mt-4 w-full rounded-lg border border-slate-300 px-3 py-2"
+            placeholder="ADMIN_TOKEN"
+          />
+          {authError && <p className="mt-3 text-sm text-rose-600">{authError}</p>}
+          <button onClick={onLogin} className="mt-4 w-full rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white">Conectează-te</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (isBooting) {
+    return <div className="flex min-h-screen items-center justify-center text-slate-700">Se încarcă datele de pe server...</div>;
+  }
+
   return (
     <div className="min-h-screen bg-slate-100 p-3 md:p-6">
       <div className="mx-auto max-w-7xl space-y-4">
-        <div className="no-print">
-          <HeaderStats
-            metrics={metrics}
-            eventName={event.name}
-            onEventNameChange={(name) => setEvent((prev) => ({ ...prev, name }))}
-            onOpenGuest={() => setGuestModal({ open: true, guest: null, targetTableId: null })}
-            onOpenTable={() => setTableModal({ open: true, table: null })}
-            onImport={() => setImportOpen(true)}
-            onExport={() => setExportOpen(true)}
-            onResetDemo={() => setEvent(resetToDemo())}
-            onClearAll={() => confirm('Ștergi toate datele?') && setEvent(clearAllData())}
-          />
-        </div>
-
-        {importMessage && <div className="no-print rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">{importMessage}</div>}
-
-        <div className="no-print rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-          <h3 className="mb-2 text-sm font-semibold text-slate-700">Căutare globală</h3>
-          <SearchBar value={globalSearch} onChange={setGlobalSearch} placeholder="ex: Maria" />
-          {globalSearch && (
-            <div className="mt-2 space-y-1 text-sm">
-              {globalSearchResult.length === 0 && <p className="text-slate-500">Niciun rezultat.</p>}
-              {globalSearchResult.map((guest) => (
-                <p key={guest.id} className="rounded-lg bg-slate-50 px-2 py-1">
-                  {guest.name} — {guest.tableNumber ? `Masa ${guest.tableNumber}` : 'Neașezat'}
-                </p>
+        <div className="no-print rounded-xl border border-slate-200 bg-white p-3 text-sm">
+          <h3 className="font-semibold text-slate-800">Salvare &amp; Backup</h3>
+          <p className="text-slate-600">Status: {serverStatus === 'online' ? 'Conectat la server' : 'Offline'}</p>
+          <p className="text-slate-600">{saveMessage}{lastSavedAt ? ` • Ultima salvare: ${new Date(lastSavedAt).toLocaleString()}` : ''}</p>
+          {saveWarning && <p className="text-amber-700">{saveWarning}</p>}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button className="rounded-lg border border-slate-300 px-3 py-1" onClick={async () => {
+              await createBackup(token);
+              await fetchBackups(token);
+            }}>
+              Creează backup
+            </button>
+            <button className="rounded-lg border border-slate-300 px-3 py-1" onClick={() => fetchBackups(token)}>Vezi backup-uri</button>
+            <button className="rounded-lg border border-rose-300 px-3 py-1 text-rose-700" onClick={async () => {
+              if (!confirm('Sigur vrei reset complet?')) return;
+              await resetEvent(token);
+              setEvent(emptyEvent());
+              setShowNoEventScreen(true);
+            }}>
+              Reset server
+            </button>
+            <button className="rounded-lg border border-slate-300 px-3 py-1" onClick={() => {
+              clearToken();
+              setToken('');
+            }}>
+              Logout
+            </button>
+          </div>
+          {backupList.length > 0 && (
+            <div className="mt-3 space-y-2">
+              {backupList.map((backup) => (
+                <div key={backup.id} className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-2 py-1">
+                  <span className="text-xs text-slate-700">{backup.id}</span>
+                  <button className="rounded border border-indigo-300 px-2 py-0.5 text-xs text-indigo-700" onClick={async () => {
+                    const restored = await restoreBackup(token, backup.id);
+                    skipNextSave.current = true;
+                    setEvent(normalizeEvent(restored.event));
+                    setShowNoEventScreen(false);
+                  }}>
+                    Restore
+                  </button>
+                  <button className="rounded border border-slate-300 px-2 py-0.5 text-xs" onClick={() => downloadBackup(token, backup.id)}>Descarcă</button>
+                </div>
               ))}
             </div>
           )}
         </div>
 
-        <div className="no-print flex flex-col gap-4 lg:flex-row">
-          <GuestSidebar
-            collapsed={collapsed}
-            setCollapsed={setCollapsed}
-            guests={filteredGuests.filter((guest) => !guest.tableId)}
-            tables={event.tables}
-            guestSearch={guestSearch}
-            onGuestSearch={setGuestSearch}
-            groupFilter={groupFilter}
-            onGroupFilter={setGroupFilter}
-            onSeat={(guest) => {
-              const tableNumber = prompt('Numărul mesei pentru invitat:');
-              const table = event.tables.find((item) => String(item.number) === tableNumber);
-              if (table) seatGuest(guest.id, table.id);
-            }}
-            onEdit={(guest) => setGuestModal({ open: true, guest, targetTableId: null })}
-            onDelete={deleteGuest}
-            onDragStart={handleDragStart}
-          />
+        {showNoEventScreen ? (
+          <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+            <h2 className="text-xl font-semibold text-slate-800">Nu există încă un eveniment salvat pe server.</h2>
+            <div className="mt-5 flex flex-wrap justify-center gap-3">
+              <button className="rounded-xl bg-indigo-600 px-4 py-2 text-white" onClick={() => {
+                setEvent(emptyEvent());
+                setShowNoEventScreen(false);
+              }}>Creează eveniment nou</button>
+              <button className="rounded-xl border border-slate-300 px-4 py-2" onClick={() => {
+                setEvent(resetToDemo());
+                setShowNoEventScreen(false);
+              }}>Încarcă date demo</button>
+              <label className="cursor-pointer rounded-xl border border-slate-300 px-4 py-2">
+                Importă backup
+                <input type="file" accept="application/json" className="hidden" onChange={(e) => e.target.files?.[0] && onImportBackupFile(e.target.files[0])} />
+              </label>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="no-print">
+              <HeaderStats
+                metrics={metrics}
+                eventName={event.name}
+                onEventNameChange={(name) => setEvent((prev) => ({ ...prev, name }))}
+                onOpenGuest={() => setGuestModal({ open: true, guest: null, targetTableId: null })}
+                onOpenTable={() => setTableModal({ open: true, table: null })}
+                onImport={() => setImportOpen(true)}
+                onExport={() => setExportOpen(true)}
+                onResetDemo={() => setEvent(resetToDemo())}
+                onClearAll={() => confirm('Ștergi toate datele?') && setEvent(clearAllData())}
+              />
+            </div>
 
-          <TableGrid
-            tables={event.tables.slice().sort((a, b) => a.number - b.number)}
-            guests={event.guests}
-            onClick={(table) => setSelectedTableId(table.id)}
-            onEdit={(table) => setTableModal({ open: true, table })}
-            onDelete={deleteTable}
-            onSeat={(table) => setGuestModal({ open: true, guest: null, targetTableId: table.id })}
-            onAddSeat={(table) => changeSeats(table, 1)}
-            onRemoveSeat={(table) => changeSeats(table, -1)}
-            onDropGuest={handleDropGuest}
-            onDragOver={(eventObj) => eventObj.preventDefault()}
-          />
-        </div>
+            {importMessage && <div className="no-print rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">{importMessage}</div>}
+
+            <div className="no-print rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+              <h3 className="mb-2 text-sm font-semibold text-slate-700">Căutare globală</h3>
+              <SearchBar value={globalSearch} onChange={setGlobalSearch} placeholder="ex: Maria" />
+              {globalSearch && (
+                <div className="mt-2 space-y-1 text-sm">
+                  {globalSearchResult.length === 0 && <p className="text-slate-500">Niciun rezultat.</p>}
+                  {globalSearchResult.map((guest) => (
+                    <p key={guest.id} className="rounded-lg bg-slate-50 px-2 py-1">
+                      {guest.name} — {guest.tableNumber ? `Masa ${guest.tableNumber}` : 'Neașezat'}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="no-print flex flex-col gap-4 lg:flex-row">
+              <GuestSidebar
+                collapsed={collapsed}
+                setCollapsed={setCollapsed}
+                guests={filteredGuests.filter((guest) => !guest.tableId)}
+                tables={event.tables}
+                guestSearch={guestSearch}
+                onGuestSearch={setGuestSearch}
+                groupFilter={groupFilter}
+                onGroupFilter={setGroupFilter}
+                onSeat={(guest) => {
+                  const tableNumber = prompt('Numărul mesei pentru invitat:');
+                  const table = event.tables.find((item) => String(item.number) === tableNumber);
+                  if (table) seatGuest(guest.id, table.id);
+                }}
+                onEdit={(guest) => setGuestModal({ open: true, guest, targetTableId: null })}
+                onDelete={deleteGuest}
+                onDragStart={handleDragStart}
+              />
+
+              <TableGrid
+                tables={event.tables.slice().sort((a, b) => a.number - b.number)}
+                guests={event.guests}
+                onClick={(table) => setSelectedTableId(table.id)}
+                onEdit={(table) => setTableModal({ open: true, table })}
+                onDelete={deleteTable}
+                onSeat={(table) => setGuestModal({ open: true, guest: null, targetTableId: table.id })}
+                onAddSeat={(table) => changeSeats(table, 1)}
+                onRemoveSeat={(table) => changeSeats(table, -1)}
+                onDropGuest={handleDropGuest}
+                onDragOver={(eventObj) => eventObj.preventDefault()}
+              />
+            </div>
+          </>
+        )}
       </div>
 
       <TableDrawer
